@@ -1,0 +1,185 @@
+#include <SoftwareSerial.h>
+#include <ESP32Servo.h>
+#include <WiFi.h>
+#include <esp_now.h>
+
+#define LED 2       // LED onboard
+#define LED1 27     // LED azul
+#define LED2 26     // LED verde
+#define LED3 25     // LED vermelho
+#define SENSOR 18   // Sensor de obstrução
+#define BOT 32      // Botão de emergência
+#define MOTOR 21    // Servo motor
+
+SoftwareSerial RFID(5, 4); // RX, TX
+Servo servoMotor;
+String CardLeitor;
+boolean acesso;
+boolean ativada = false; // Verifica se a catraca já não está operando
+
+uint8_t broadcastAddress[] = {0x1C, 0x69, 0x20, 0x31, 0x14, 0x60};  // MAC Address da outra ESP32
+
+// Função para envio de dados via ESPNOW
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("\r\nStatus de envio: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Sucesso" : "Falhou");
+}
+
+void setup()
+{
+  Serial.begin(9600);
+  RFID.begin(9600);
+  pinMode(LED, OUTPUT);
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
+  pinMode(SENSOR, INPUT);
+  pinMode(BOT, INPUT);
+  servoMotor.attach(MOTOR);
+  
+  // Inicializa WiFi no modo Station (necessário para ESPNOW)
+  WiFi.mode(WIFI_STA);
+  Serial.println("Endereço MAC da placa ESP: " + WiFi.macAddress());
+
+  // Inicializa ESPNOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Erro ao inicializar ESPNOW");
+    return;
+  }
+  
+  esp_now_register_send_cb(OnDataSent);
+
+  // Registra o peer (outra ESP32)
+  esp_now_peer_info_t peerInfo;
+  memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Erro ao adicionar o peer");
+    return;
+  }
+}
+
+boolean Banco(String CardLeitor){
+  File file = SPIFFS.open("/cards.txt", "r");  // Lê o arquivo cards.txt do SPIFFS
+  if (!file) {
+    Serial.println("Erro ao abrir o arquivo de cartões.");
+    return false;
+  }
+  
+  while (file.available()) {
+    String cardID = file.readStringUntil('\n');
+    cardID.trim();  // Remove espaços ou quebras de linha extras
+    if (cardID == CardLeitor) {
+      
+      // **** Envio de CardLeitor via ESPNOW ****
+      const char *msg = CardLeitor.c_str();
+      esp_err_t result = esp_now_send(broadcastAddress, (uint8_t *)msg, strlen(msg));
+      if (result == ESP_OK) {
+        Serial.println("Dados enviados via ESPNOW: " + CardLeitor);
+      } else {
+        Serial.println("Erro ao enviar dados via ESPNOW");
+      }
+      // ****************************************
+      
+      file.close();
+      return true;
+    }
+  }
+  
+  file.close();
+  return false;  // Não encontrou o cartão
+}
+
+void loop()
+{
+  // Manipulação do Botão de Emergência
+  if(digitalRead(BOT) == HIGH){
+    digitalWrite(LED3, HIGH);
+    servoMotor.write(90); // Abre a catraca (90º)
+    Serial.println("*******EMERGÊNCIA!!*******");
+    while(true){
+      digitalWrite(LED3, !digitalRead(LED3)); // Pisca o LED3
+      delay(1000);
+    }
+  }
+
+  // Manipulação da Catraca
+  if(digitalRead(SENSOR) == HIGH){ // Catraca fechada
+    servoMotor.write(0); // Fecha a catraca (0º)
+  } else { // Catraca aberta ou obstruída
+    while(digitalRead(SENSOR) == LOW){
+      digitalWrite(LED3, HIGH);
+      Serial.println("Desobstrua a catraca!!");
+      delay(1000);
+      digitalWrite(LED3, LOW);
+      delay(1000);
+    }
+  }
+  
+  // Leitura do RFID
+  if (!ativada) {
+    if (RFID.available() > 0) {
+      ativada = true; // Marca o início da leitura
+      Serial.println("Lendo..");
+     
+      while (RFID.available() > 0) {
+       digitalWrite(LED, HIGH); // Acende o LED azul enquanto lê
+       digitalWrite(LED1, HIGH); // Acende o LED azul enquanto lê
+       delay(5);
+       char c = RFID.read();
+       CardLeitor += c;
+       digitalWrite(LED, LOW); // Apaga o LED azul após a leitura
+       digitalWrite(LED1, LOW); // Apaga o LED azul após a leitura
+      }
+      delay(1000);
+      CardLeitor = CardLeitor.substring(1, 11); // Extrai o ID do cartão
+      Serial.println("ID do Cartão : " + CardLeitor);
+
+      acesso = Banco(CardLeitor);
+
+      if(acesso) { // Acesso permitido
+        Serial.println("Acesso Permitido");
+        digitalWrite(LED2, HIGH); // Acende o LED verde
+        delay(1000);
+        digitalWrite(LED2, LOW);
+        
+        if(digitalRead(SENSOR) == LOW){ // Se a catraca estiver obstruída
+          Serial.println("Atenção, catraca obstruída!!");
+          digitalWrite(LED3, HIGH);
+          delay(2000);
+          digitalWrite(LED3, LOW);
+        } else { // Se a catraca não estiver obstruída
+          Serial.println("Catraca abrindo..");
+          servoMotor.write(90); // Abre a catraca (90º)
+          delay(3000);
+          Serial.println("Acesso liberado!!");
+          digitalWrite(LED1, HIGH); // Acende o LED azul enquanto passa
+          delay(4000); // Tempo para passar
+          
+          while(digitalRead(SENSOR) == LOW){ // Espera o passageiro completar a passagem
+            Serial.println("Complete a passagem!!");
+            delay(500); // Previne a sobrecarga do serial
+          }
+          
+          digitalWrite(LED1, LOW);
+          Serial.println("Catraca fechando..");
+          servoMotor.write(0); // Fecha a catraca (0º)
+          delay(3000);
+        }
+      } else { // Acesso negado
+        Serial.println("Acesso Negado");
+        digitalWrite(LED3, HIGH); // Acende o LED vermelho
+        delay(1000);
+        digitalWrite(LED3, LOW);
+      }
+
+      CardLeitor = ""; // Reseta CardLeitor
+      ativada = false; // Marca o fim da leitura
+    } else {
+      Serial.println("Aguardando..");
+      delay(500);
+    }
+  }
+}
