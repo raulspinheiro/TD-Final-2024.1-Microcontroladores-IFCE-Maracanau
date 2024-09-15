@@ -1,0 +1,3 @@
+5100D89A8F,Cezanildo Araújo,Estudante,Ciência da Computação
+1234A6789B,Maria Souza,Servidor,Secretaria Acadêmica
+1994A5089B,Alberto Lattes,Professor
